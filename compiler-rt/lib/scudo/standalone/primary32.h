@@ -648,6 +648,7 @@ void SizeClassAllocator32<Config>::pushBatchClassBlocks(SizeClassInfo *Sci,
     // memory group here.
     BG->CompactPtrGroupBase = 0;
     BG->BytesInBGAtLastCheckpoint = 0;
+    BG->LastReleaseTimeNs = 0;
     BG->MaxCachedPerBatch = SizeClassAllocatorT::getMaxCached(
         getSizeByClassId(SizeClassMap::BatchClassId));
 
@@ -734,6 +735,7 @@ void SizeClassAllocator32<Config>::pushBlocksImpl(
     BG->CompactPtrGroupBase = CompactPtrGroupBase;
     BG->Batches.push_front(TB);
     BG->BytesInBGAtLastCheckpoint = 0;
+    BG->LastReleaseTimeNs = 0;
     BG->MaxCachedPerBatch = MaxNumBlocksInBatch;
 
     return BG;
@@ -1184,16 +1186,6 @@ bool SizeClassAllocator32<Config>::hasChanceToReleasePages(
     // of unreleased pages in the large size classes is around 16 pages or
     // more. Choose half of it as a heuristic and which also avoids page
     // release every time for every pushBlocks() attempt by large blocks.
-    const bool ByPassReleaseInterval =
-        isLargeBlock(BlockSize) && PushedBytesDelta > 8 * PageSize;
-    if (!ByPassReleaseInterval) {
-      if (Sci->ReleaseInfo.LastReleaseAtNs +
-              static_cast<u64>(IntervalMs) * 1000000 >
-          getMonotonicTimeFast()) {
-        // Memory was returned recently.
-        return false;
-      }
-    }
   } // if (ReleaseType == ReleaseToOS::Normal)
 
   return true;
@@ -1242,6 +1234,13 @@ PageReleaseContext SizeClassAllocator32<Config>::markFreeBlocks(
       if (PushedBytesDelta < PageSize)
         continue;
 
+      const u64 CurTimeNs = getMonotonicTimeFast();
+      const u64 DiffSinceLastReleaseNs = CurTimeNs - BG.LastReleaseTimeNs;
+      const s64 IntervalMs = atomic_load_relaxed(&ReleaseToOsIntervalMs);
+      const u64 IntervalNs = static_cast<u64>(IntervalMs) * 1000000;
+      if (DiffSinceLastReleaseNs < IntervalNs)
+        continue;
+
       // Given the randomness property, we try to release the pages only if
       // the bytes used by free blocks exceed certain proportion of allocated
       // spaces.
@@ -1254,6 +1253,7 @@ PageReleaseContext SizeClassAllocator32<Config>::markFreeBlocks(
     // TODO: Consider updating this after page release if `ReleaseRecorder`
     // can tell the released bytes in each group.
     BG.BytesInBGAtLastCheckpoint = BytesInBG;
+    BG.LastReleaseTimeNs = getMonotonicTimeFast();
 
     const uptr MaxContainedBlocks = AllocatedGroupSize / BlockSize;
     const uptr RegionIndex = (GroupBase - Base) / RegionSize;

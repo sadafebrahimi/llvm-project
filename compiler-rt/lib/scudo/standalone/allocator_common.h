@@ -77,6 +77,8 @@ template <class SizeClassAllocator> struct BatchGroup {
   // This is used to track how many bytes are not in-use since last time we
   // tried to release pages.
   uptr BytesInBGAtLastCheckpoint;
+  // The last time this group tried to release pages.
+  u64 LastReleaseTimeNs;
   // Blocks are managed by Batch in a list.
   SinglyLinkedList<Batch<SizeClassAllocator>> Batches;
   // Cache value of SizeClassAllocatorLocalCache::getMaxCached()

@@ -860,6 +860,7 @@ void SizeClassAllocator64<Config>::pushBlocksImpl(
     BG->CompactPtrGroupBase = CompactPtrGroupBase;
     BG->Batches.push_front(TB);
     BG->BytesInBGAtLastCheckpoint = 0;
+    BG->LastReleaseAtNs = 0;
     BG->MaxCachedPerBatch = MaxNumBlocksInBatch;
 
     return BG;
@@ -1004,6 +1005,7 @@ void SizeClassAllocator64<Config>::pushBatchClassBlocks(RegionInfo *Region,
     // memory group here.
     BG->CompactPtrGroupBase = 0;
     BG->BytesInBGAtLastCheckpoint = 0;
+    BG->LastReleaseAtNs = 0;
     BG->MaxCachedPerBatch = SizeClassAllocatorT::getMaxCached(
         getSizeByClassId(SizeClassMap::BatchClassId));
 
@@ -1576,44 +1578,6 @@ bool SizeClassAllocator64<Config>::hasChanceToReleasePages(
     const s64 IntervalMs = atomic_load_relaxed(&ReleaseToOsIntervalMs);
     if (IntervalMs < 0)
       return false;
-
-    const u64 IntervalNs = static_cast<u64>(IntervalMs) * 1000000;
-    const u64 CurTimeNs = getMonotonicTimeFast();
-    const u64 DiffSinceLastReleaseNs =
-        CurTimeNs - Region->ReleaseInfo.LastReleaseAtNs;
-
-    // At here, `RegionPushedBytesDelta` is more than half of
-    // `TryReleaseThreshold`. If the last release happened 2 release interval
-    // before, we will still try to see if there's any chance to release some
-    // memory even it doesn't exceed the threshold.
-    if (RegionPushedBytesDelta < Region->ReleaseInfo.TryReleaseThreshold) {
-      // We want the threshold to have a shorter response time to the variant
-      // memory usage patterns. According to data collected during experiments
-      // (which were done with 1, 2, 4, 8 intervals), `2` strikes the better
-      // balance between the memory usage and number of page release attempts.
-      if (DiffSinceLastReleaseNs < 2 * IntervalNs)
-        return false;
-    } else if (DiffSinceLastReleaseNs < IntervalNs) {
-      // `TryReleaseThreshold` is capped by (1UL << GroupSizeLog) / 2). If
-      // RegionPushedBytesDelta grows to twice the threshold, it implies some
-      // huge deallocations have happened so we better try to release some
-      // pages. Note this tends to happen for larger block sizes.
-      if (RegionPushedBytesDelta > (1ULL << GroupSizeLog))
-        return true;
-
-      // In this case, we are over the threshold but we just did some page
-      // release in the same release interval. This is a hint that we may want
-      // a higher threshold so that we can release more memory at once.
-      // `TryReleaseThreshold` will be adjusted according to how many bytes
-      // are not released, i.e., the `PendingPushedBytesdelta` here.
-      // TODO(chiahungduan): Apply the same adjustment strategy to small
-      // blocks.
-      if (!isSmallBlock(BlockSize))
-        Region->ReleaseInfo.PendingPushedBytesDelta = RegionPushedBytesDelta;
-
-      // Memory was returned recently.
-      return false;
-    }
   } // if (ReleaseType == ReleaseToOS::Normal)
 
   return true;
@@ -1628,6 +1592,10 @@ SizeClassAllocator64<Config>::collectGroupsToRelease(
   const uptr PageSize = getPageSizeCached();
   SinglyLinkedList<BatchGroupT> GroupsToRelease;
 
+  const u64 CurTimeNs = getMonotonicTimeFast();
+  const s64 IntervalMs = atomic_load_relaxed(&ReleaseToOsIntervalMs);
+  const u64 IntervalNs = static_cast<u64>(IntervalMs) * 1000000;
+
   // We are examining each group and will take the minimum distance to the
   // release threshold as the next `TryReleaseThreshold`. Note that if the
   // size of free blocks has reached the release threshold, the distance to
@@ -1638,6 +1606,15 @@ SizeClassAllocator64<Config>::collectGroupsToRelease(
   for (BatchGroupT *BG = Region->FreeListInfo.BlockList.front(),
                    *Prev = nullptr;
        BG != nullptr;) {
+    if (IntervalMs >= 0) {
+      const u64 DiffSinceLastReleaseNs = CurTimeNs - BG->LastReleaseAtNs;
+      if (DiffSinceLastReleaseNs < IntervalNs) {
+        Prev = BG;
+        BG = BG->Next;
+        continue;
+      }
+    }
+
     // Group boundary is always GroupSize-aligned from CompactPtr base. The
     // layout of memory groups is like,
     //
@@ -1770,6 +1747,7 @@ SizeClassAllocator64<Config>::collectGroupsToRelease(
     // TODO: Consider updating this after releasing pages if `ReleaseRecorder`
     // can tell the released bytes in each group.
     Cur->BytesInBGAtLastCheckpoint = BytesInBG;
+    Cur->LastReleaseAtNs = CurTimeNs;
 
     if (Prev != nullptr)
       Region->FreeListInfo.BlockList.extract(Prev, Cur);

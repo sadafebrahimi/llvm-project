@@ -110,8 +110,8 @@ struct AndroidConfig {
     static const uptr GroupSizeLog = 18U;
     typedef uptr CompactPtrT;
 #endif
-    static const s32 MinReleaseToOsIntervalMs = 1000;
-    static const s32 MaxReleaseToOsIntervalMs = 1000;
+    static const s32 MinReleaseToOsIntervalMs = 5000;
+    static const s32 MaxReleaseToOsIntervalMs = 5000;
   };
 #if SCUDO_CAN_USE_PRIMARY64
   template <typename Config> using PrimaryT = SizeClassAllocator64<Config>;

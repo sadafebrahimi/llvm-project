@@ -84,6 +84,7 @@ template <class SizeClassAllocator> struct BatchGroup {
   // of blocks. As long as we make BatchClass follow this constraint, this
   // field can be removed.
   u16 MaxCachedPerBatch;
+  u64 LastReleaseAtNs;
 };
 
 } // namespace scudo
